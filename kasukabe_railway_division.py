@@ -1,6 +1,7 @@
 """
 春日部駅周辺を東武スカイツリー線路で分割した2領域にランダムポイントを生成
 各ポイントの住所を逆ジオコーディングで取得するシステム
+10回繰り返して結果を出力
 """
 
 import osmnx as ox
@@ -13,6 +14,7 @@ import random
 import math
 import time
 from geopy.geocoders import Nominatim
+import json
 
 # ==================== 設定パラメータ ====================
 KASUKABE_STATION_LAT = 35.9749
@@ -25,6 +27,9 @@ RAILWAY_END = (35.9751, 139.7450)      # 5998 Kasukabe
 
 # OSMnx での検索タグ
 RAILWAY_TAGS = {'railway': 'rail'}  # 東武スカイツリー線
+
+# 繰り返し回数
+NUM_ITERATIONS = 10
 
 
 def create_search_area_polygon(center_lat, center_lon, radius_km):
@@ -58,8 +63,6 @@ def get_railway_line(start_lat, start_lon, end_lat, end_lon, search_distance=200
     OpenStreetMap から東武スカイツリー線路を取得
     線路をポリラインとして抽出
     """
-    print("🚄 東武スカイツリー線路を検索中...\n")
-    
     try:
         # 線路のジオメトリを取得
         # 複数のソースから線路を検索
@@ -77,7 +80,6 @@ def get_railway_line(start_lat, start_lon, end_lat, end_lon, search_distance=200
                 tags,
                 dist=search_distance
             )
-            print(f"✅ 線路データを取得: {len(features)} 件")
             
             # ジオメトリを抽出
             railway_lines = []
@@ -88,22 +90,17 @@ def get_railway_line(start_lat, start_lon, end_lat, end_lon, search_distance=200
             if railway_lines:
                 # 全ての線路を結合
                 combined_railway = unary_union(railway_lines)
-                print(f"✅ 線路を結合完了")
                 return combined_railway
             else:
-                print("⚠️ 線路ジオメトリが見つかりません。代わりにシンプルなラインを使用します。")
                 # シンプルな線路ラインを作成（2点を結ぶ直線）
                 simple_line = LineString([(start_lon, start_lat), (end_lon, end_lat)])
                 return simple_line
                 
         except Exception as e:
-            print(f"⚠️ エラー: {e}")
-            print("   シンプルなラインを使用します。")
             simple_line = LineString([(start_lon, start_lat), (end_lon, end_lat)])
             return simple_line
             
     except Exception as e:
-        print(f"❌ エラー: {e}")
         # フォールバック: シンプルなライン
         simple_line = LineString([(start_lon, start_lat), (end_lon, end_lat)])
         return simple_line
@@ -113,11 +110,8 @@ def split_area_by_railway(search_polygon, railway_line):
     """
     検索エリアを線路で2つの領域に分割
     """
-    print("\n🗺️  検索エリアを線路で分割中...\n")
-    
     try:
         # 線路で領域を分割
-        # 線路の周辺にバッファを作成して、線路が交差するようにする
         railway_buffer = railway_line.buffer(0.0001)  # 小さなバッファ
         
         # 差分演算で分割
@@ -126,16 +120,10 @@ def split_area_by_railway(search_polygon, railway_line):
         if len(divided_area.geoms) >= 2:
             area1 = divided_area.geoms[0]
             area2 = divided_area.geoms[1]
-            print(f"✅ 領域を2つに分割完了")
-            print(f"   領域1 面積: {area1.area:.6f}")
-            print(f"   領域2 面積: {area2.area:.6f}")
             return area1, area2
         else:
-            print("⚠️ 完全な分割ができませんでした。代替方法を使用します。")
-            # 線路を使用した代替分割
             return fallback_split(search_polygon, railway_line)
     except Exception as e:
-        print(f"⚠️ 分割エラー: {e}")
         return fallback_split(search_polygon, railway_line)
 
 
@@ -182,7 +170,6 @@ def fallback_split(search_polygon, railway_line):
         
         return area1, area2
     except Exception as e:
-        print(f"❌ 代替分割もエラー: {e}")
         # 最終手段: 中心で単純に分割
         bounds = search_polygon.bounds
         mid_lat = (bounds[1] + bounds[3]) / 2
@@ -209,6 +196,40 @@ def generate_random_point_in_polygon(polygon, max_attempts=100):
     return polygon.representative_point()
 
 
+def convert_to_googlemaps_address(lat, lon, raw_address):
+    """
+    Nominatim のアドレスを Google Maps で検索できる形式に変換
+    """
+    # 基本的には「座標, 住所」の形式に変換
+    # Google Maps は「latitude, longitude」や「address」で検索可能
+    
+    # 日本語アドレスへの変換を試みる
+    try:
+        # Nominatim の返す英語アドレスを簡潔にしつつ、座標も含める
+        # Google Maps フォーマット: 緯度,経度 または 住所
+        
+        # 住所から不要な部分を削除
+        address_parts = raw_address.split(',')
+        
+        # 最後の国名（Japan）を除いて、前から3-4個の要素を取得
+        filtered_parts = [part.strip() for part in address_parts if part.strip() and 'Japan' not in part]
+        
+        if len(filtered_parts) > 0:
+            # 最後の2-3要素を使用（市区町村、通り名など）
+            important_parts = filtered_parts[-3:] if len(filtered_parts) >= 3 else filtered_parts
+            google_maps_address = ', '.join(important_parts)
+        else:
+            google_maps_address = raw_address
+        
+        # フォーマット: 「住所 (座標)」
+        formatted_address = f"{google_maps_address} ({lat:.6f}, {lon:.6f})"
+        
+        return formatted_address
+    except Exception as e:
+        # エラー時は座標をベースにしたアドレスを返す
+        return f"{lat:.6f}, {lon:.6f}"
+
+
 def get_address_from_coordinates(lat, lon, max_retries=3):
     """
     緯度経度から住所を取得（逆ジオコーディング）
@@ -222,100 +243,126 @@ def get_address_from_coordinates(lat, lon, max_retries=3):
             return address
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"   ⏳ リトライ {attempt + 1}/{max_retries - 1}...")
-                time.sleep(1)  # 1秒待機
+                time.sleep(0.5)  # 0.5秒待機
             else:
-                return f"住所取得失敗: {lat:.6f}, {lon:.6f}"
+                return f"{lat:.6f}, {lon:.6f}"
     
-    return f"住所取得失敗: {lat:.6f}, {lon:.6f}"
+    return f"{lat:.6f}, {lon:.6f}"
 
 
 def main():
-    print("\n" + "="*70)
+    print("\n" + "="*80)
     print("🚉 春日部駅周辺を線路で分割し、2つの領域にランダムポイントを生成")
-    print("="*70 + "\n")
+    print("="*80 + "\n")
     
-    # ステップ 1: 検索エリアを作成
-    print("📍 ステップ 1: 検索エリア（半径1km の円）を作成中...\n")
+    # 初期化（1回目のみ）
+    print("📍 初期化: 検索エリア、線路を取得中...\n")
+    
     search_polygon, bounds = create_search_area_polygon(
         KASUKABE_STATION_LAT,
         KASUKABE_STATION_LON,
         RADIUS_KM
     )
-    print(f"✅ 検索エリア作成完了")
-    print(f"   中心: ({KASUKABE_STATION_LAT}, {KASUKABE_STATION_LON})")
-    print(f"   半径: {RADIUS_KM} km\n")
+    print(f"✅ 検索エリア作成完了: 半径 {RADIUS_KM} km")
     
-    # ステップ 2: 線路を取得
-    print("📍 ステップ 2: 東武スカイツリー線路を取得中...\n")
     railway_line = get_railway_line(
         RAILWAY_START[0], RAILWAY_START[1],
         RAILWAY_END[0], RAILWAY_END[1]
     )
-    print()
+    print(f"✅ 東武スカイツリー線路を取得完了\n")
     
-    # ステップ 3: エリアを分割
-    print("📍 ステップ 3: エリアを線路で分割中...\n")
-    area1, area2 = split_area_by_railway(search_polygon, railway_line)
+    # 10回繰り返し実行
+    all_results = []
     
-    # ステップ 4: 各領域にランダムポイントを生成
-    print("\n📍 ステップ 4: 各領域にランダムポイントを生成中...\n")
+    for iteration in range(NUM_ITERATIONS):
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"【実行 {iteration + 1}/{NUM_ITERATIONS}】")
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        
+        # エリアを分割
+        area1, area2 = split_area_by_railway(search_polygon, railway_line)
+        
+        # 各領域にランダムポイントを生成
+        point1 = generate_random_point_in_polygon(area1)
+        lat1, lon1 = point1.y, point1.x
+        
+        point2 = generate_random_point_in_polygon(area2)
+        lat2, lon2 = point2.y, point2.x
+        
+        # 住所を取得
+        print(f"   📍 領域1 の住所を取得中... ", end='', flush=True)
+        raw_address1 = get_address_from_coordinates(lat1, lon1)
+        address1 = convert_to_googlemaps_address(lat1, lon1, raw_address1)
+        print(f"✅\n   {address1}\n")
+        
+        print(f"   📍 領域2 の住所を取得中... ", end='', flush=True)
+        raw_address2 = get_address_from_coordinates(lat2, lon2)
+        address2 = convert_to_googlemaps_address(lat2, lon2, raw_address2)
+        print(f"✅\n   {address2}\n")
+        
+        # 結果を保存
+        result = {
+            'iteration': iteration + 1,
+            'area1': {
+                'latitude': lat1,
+                'longitude': lon1,
+                'raw_address': raw_address1,
+                'google_maps_address': address1
+            },
+            'area2': {
+                'latitude': lat2,
+                'longitude': lon2,
+                'raw_address': raw_address2,
+                'google_maps_address': address2
+            }
+        }
+        all_results.append(result)
+        
+        # Nominatim のレート制限を回避するため、少し待機
+        if iteration < NUM_ITERATIONS - 1:
+            time.sleep(1)
     
-    print("   領域1 にランダムポイントを生成...")
-    point1 = generate_random_point_in_polygon(area1)
-    lat1, lon1 = point1.y, point1.x
-    print(f"   ✅ 座標: ({lat1:.6f}, {lon1:.6f})")
+    # 最終結果を表示
+    print("\n" + "="*80)
+    print("【 最終結果 - 10組の住所ペア 】")
+    print("="*80 + "\n")
     
-    print("   領域2 にランダムポイントを生成...")
-    point2 = generate_random_point_in_polygon(area2)
-    lat2, lon2 = point2.y, point2.x
-    print(f"   ✅ 座標: ({lat2:.6f}, {lon2:.6f})\n")
+    for result in all_results:
+        iteration = result['iteration']
+        area1_addr = result['area1']['google_maps_address']
+        area2_addr = result['area2']['google_maps_address']
+        
+        print(f"【{iteration}】")
+        print(f"  領域1: {area1_addr}")
+        print(f"  領域2: {area2_addr}")
+        print()
     
-    # ステップ 5: 住所を取得
-    print("📍 ステップ 5: 各ポイントの住所を逆ジオコーディングで取得中...\n")
-    
-    print("   領域1 の住所を取得中...")
-    address1 = get_address_from_coordinates(lat1, lon1)
-    print(f"   ✅ 住所: {address1}\n")
-    
-    print("   領域2 の住所を取得中...")
-    address2 = get_address_from_coordinates(lat2, lon2)
-    print(f"   ✅ 住所: {address2}\n")
-    
-    # 結果を出力
-    print("="*70)
-    print("【 最終結果 】")
-    print("="*70)
-    print(f"\n【領域1】")
-    print(f"  座標: ({lat1:.6f}, {lon1:.6f})")
-    print(f"  🏠 住所: {address1}")
-    print(f"\n【領域2】")
-    print(f"  座標: ({lat2:.6f}, {lon2:.6f})")
-    print(f"  🏠 住所: {address2}")
-    print("\n" + "="*70)
+    print("="*80)
     print("✨ 処理完了！\n")
     
     # 結果を JSON ファイルに保存
-    results = {
-        'area1': {
-            'latitude': lat1,
-            'longitude': lon1,
-            'address': address1
-        },
-        'area2': {
-            'latitude': lat2,
-            'longitude': lon2,
-            'address': address2
-        }
-    }
+    with open('kasukabe_random_points_results_10.json', 'w', encoding='utf-8') as f:
+        json.dump(all_results, f, ensure_ascii=False, indent=2)
     
-    import json
-    with open('kasukabe_random_points_results.json', 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    print("💾 詳細結果を保存: kasukabe_random_points_results_10.json\n")
     
-    print("💾 結果を保存: kasukabe_random_points_results.json\n")
+    # 簡潔な CSV にも保存
+    csv_data = []
+    for result in all_results:
+        csv_data.append({
+            '実行番号': result['iteration'],
+            '領域1_住所': result['area1']['google_maps_address'],
+            '領域2_住所': result['area2']['google_maps_address'],
+            '領域1_緯度': result['area1']['latitude'],
+            '領域1_経度': result['area1']['longitude'],
+            '領域2_緯度': result['area2']['latitude'],
+            '領域2_経度': result['area2']['longitude'],
+        })
     
-    return results
+    df_csv = pd.DataFrame(csv_data)
+    df_csv.to_csv('kasukabe_random_points_results_10.csv', index=False, encoding='utf-8-sig')
+    
+    print("💾 CSV 結果を保存: kasukabe_random_points_results_10.csv\n")
 
 
 if __name__ == '__main__':
